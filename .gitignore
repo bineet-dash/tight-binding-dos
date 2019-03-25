@@ -1,0 +1,12 @@
+*
+!*.cpp
+!*.hpp
+!*.json
+!*.md
+!*.gnuplot
+!*.sh
+test*
+!.gitignore
+
+!.vscode/
+!results/
