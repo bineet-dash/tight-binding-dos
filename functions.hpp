@@ -12,10 +12,12 @@
 
 extern int size;
 extern double t;
+extern double U;
 extern double G;
 
 int size;
 double t=1;
+double U;
 double G;
 
 using std::cout;
@@ -28,6 +30,7 @@ using std::vector;
 inline int xc(int i, int sigma=1){return (sigma==1)?std::floor(i/size):std::floor((i-size*size)/size);}
 inline int yc(int j, int sigma=1){return (sigma==1)?j%size:(j-size*size)%size;}
 inline int periodic(int a, int b, int lim) {int rem = (a+b)%lim; if(rem>=0) return rem; else return rem+lim;}
+inline double filter_d(double x){return (std::abs(x)<1e-4)?0.0:x; }
 
 Eigen::MatrixXd construct_h0_2d(void)
 {
@@ -64,27 +67,97 @@ MatrixXd construct_h0(void)
   return Mc;
 }
 
-bool zheev_cpp(MatrixXcd& A, vector<double>& lambda, char eigenvec_choice='N')
+
+MatrixXd H_int(VectorXd n_down_avg, VectorXd n_up_avg)
 {
-  int N = A.cols();
-  int LDA = A.outerStride();
-  int INFO = 0;
-  double* w = new  double [N];
-  char Nchar = 'N';
-  char Vchar = 'V';
-  char Uchar = 'U';
-  int LWORK = int(A.size())*4;
-  __complex__ double* WORK= new __complex__ double [LWORK];
-  double* RWORK = new double [3*LDA];
+  MatrixXd H_n_up = MatrixXd::Zero(2*n_down_avg.size(), 2*n_down_avg.size());
+  for(int i=0; i<n_down_avg.size(); i++)
+  {
+    H_n_up(i,i) = U*n_down_avg(i);
+  }
 
-  zheev_( &eigenvec_choice, &Uchar, &N, reinterpret_cast <__complex__ double*> (A.data()), &LDA, w, WORK, &LWORK, RWORK, &INFO );
+  MatrixXd H_n_down = MatrixXd::Zero(2*n_up_avg.size(), 2*n_up_avg.size());
+  for(int i=0; i<n_up_avg.size(); i++)
+  {
+    H_n_down(i+size*size,i+size*size) = U*n_up_avg(i);
+  }
 
-  lambda.clear();
-  for(int i=0; i<N; i++) lambda.push_back(w[i]);
+  double sum = 0.0;
+  for(int i=0; i<n_up_avg.size(); i++)
+  {
+    sum += -U*n_up_avg(i)*n_down_avg(i);
+  }
+  MatrixXd H_n_up_down = MatrixXd::Identity(2*n_up_avg.size(), 2*n_up_avg.size())*sum;
 
-  delete[] w; delete[] RWORK; delete[] WORK;
-  return INFO==0;
+  return H_n_up + H_n_down + H_n_up_down;
 }
+
+double get_mu(double temperature, std::vector<double> v, double reqd_fill=1.0)
+{
+  sort (v.begin(), v.end());
+  double bisection_up_lim = v.back();
+  double bisection_low_lim = v.front();
+
+  double mu, fill; int count=0;
+  double epsilon = 0.000001;
+
+  for(; ;)
+  {
+    fill=0;
+    mu = 0.5*(bisection_low_lim+bisection_up_lim);
+
+    for(auto it = v.begin(); it!= v.end(); it++)
+    {
+      double fermi_func = 1/(exp((*it-mu)/temperature)+1);
+      fill += fermi_func/(size*size);
+    }
+    if(abs(fill-reqd_fill) < epsilon)
+    {
+      return mu; break;
+    }
+    else if(fill > reqd_fill+epsilon)
+    {
+      if(abs(bisection_up_lim-v.front())<0.001)
+      {
+        return mu; 
+        break;
+      }
+      else 
+      {
+        bisection_up_lim=mu;
+      }
+    }
+    else if(fill < reqd_fill-epsilon)
+    { 
+      if(abs(bisection_low_lim-v.back())<0.001)
+      {
+        return mu;
+        break;
+      }
+      else 
+      {
+        bisection_low_lim=mu;
+      }
+    }
+  }
+}
+
+double get_mu(double temperature, VectorXd v, double reqd_fill=1.0)
+{
+  std::vector<double> stdv (v.data(),v.data()+v.size());
+  return get_mu(temperature, stdv, reqd_fill);
+}
+
+double get_n_sigma(VectorXd eivals_minus_mu, MatrixXcd eivec, double temperature, int site_with_spin)
+{
+  double g = 0.0;
+  for(int lambda = 0; lambda < eivals_minus_mu.size(); lambda++)
+  {
+    g += std::norm(eivec(site_with_spin, lambda))/(1+exp(-eivals_minus_mu(lambda)/temperature));
+  }
+  return 1-g;
+}
+
 
 bool zgeev_cpp(MatrixXcd& A, vector<double>& lambda, char eigenvec_choice='N')
 {  
@@ -105,6 +178,28 @@ bool zgeev_cpp(MatrixXcd& A, vector<double>& lambda, char eigenvec_choice='N')
 
   lambda.clear();
   for(int i=0; i<N; i++) lambda.push_back(__real__ w[i]);
+
+  delete[] w; delete[] RWORK; delete[] WORK;
+  return INFO==0;
+}
+
+bool zheev_cpp(MatrixXcd& A, vector<double>& lambda, char eigenvec_choice='N')
+{
+  int N = A.cols();
+  int LDA = A.outerStride();
+  int INFO = 0;
+  double* w = new  double [N];
+  char Nchar = 'N';
+  char Vchar = 'V';
+  char Uchar = 'U';
+  int LWORK = int(A.size())*4;
+  __complex__ double* WORK= new __complex__ double [LWORK];
+  double* RWORK = new double [3*LDA];
+
+  zheev_( &eigenvec_choice, &Uchar, &N, reinterpret_cast <__complex__ double*> (A.data()), &LDA, w, WORK, &LWORK, RWORK, &INFO );
+
+  lambda.clear();
+  for(int i=0; i<N; i++) lambda.push_back(w[i]);
 
   delete[] w; delete[] RWORK; delete[] WORK;
   return INFO==0;
